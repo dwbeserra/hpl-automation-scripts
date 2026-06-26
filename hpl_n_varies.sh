@@ -3,6 +3,14 @@
 set -euo pipefail
 trap 'echo "Error on line $LINENO"; exit 1' ERR
 
+# Force single-threaded BLAS/OpenMP inside each MPI rank.
+# This avoids uncontrolled oversubscription when using mpirun -np 4.
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export GOTO_NUM_THREADS=1
+export BLIS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
 collectl_pids=()
 
 cleanup() {
