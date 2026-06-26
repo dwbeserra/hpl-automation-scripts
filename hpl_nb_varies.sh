@@ -4,7 +4,6 @@ set -euo pipefail
 trap 'echo "Error on line $LINENO"; exit 1' ERR
 
 # Force single-threaded BLAS/OpenMP inside each MPI rank.
-# This avoids uncontrolled oversubscription when using mpirun -np 4.
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 export GOTO_NUM_THREADS=1
@@ -94,20 +93,21 @@ trap cleanup EXIT INT TERM
 
 usage() {
     cat <<EOF
-Usage: $0 <min_percentage> <max_percentage> <step_percentage> <repetitions>
+Usage: $0 <N> <min_NB> <max_NB> <step_NB> <repetitions>
 
-  min_percentage  : minimum percentage of available RAM to use for N
-  max_percentage  : maximum percentage of available RAM to use for N
-  step_percentage : percentage increment
-  repetitions     : number of repetitions for each N
+  N           : fixed HPL problem size
+  min_NB      : minimum HPL NB value
+  max_NB      : maximum HPL NB value
+  step_NB     : NB increment
+  repetitions : number of repetitions for each NB
 
 Example:
-  $0 10 80 10 5
+  $0 15848 64 256 32 5
 EOF
     exit 2
 }
 
-if [ $# -ne 4 ]; then
+if [ $# -ne 5 ]; then
     echo "Error: wrong number of arguments."
     usage
 fi
@@ -120,50 +120,53 @@ for arg in "$@"; do
     fi
 done
 
-min_val=$1
-max_val=$2
-step=$3
-repetitions=$4
+N=$1
+min_nb=$2
+max_nb=$3
+step_nb=$4
+repetitions=$5
 
-if (( min_val > max_val )); then
-    echo "Error: min_percentage ($min_val) must be <= max_percentage ($max_val)."
+if (( min_nb > max_nb )); then
+    echo "Error: min_NB ($min_nb) must be <= max_NB ($max_nb)."
     usage
 fi
 
-if (( step <= 0 || repetitions <= 0 )); then
-    echo "Error: step and repetitions must be > 0."
+if (( N <= 0 || step_nb <= 0 || repetitions <= 0 )); then
+    echo "Error: N, step_NB and repetitions must be > 0."
     usage
 fi
 
-generate_n_values() {
-    local available_mem_bytes
-    available_mem_bytes=$(grep MemAvailable /proc/meminfo | awk '{print $2 * 1024}')
-    echo "Available memory (bytes): $available_mem_bytes"
-
-    local pct N used_mem_bytes
-    N_values=()
-
-    for (( pct = min_val; pct <= max_val; pct += step )); do
-        used_mem_bytes=$(echo "$available_mem_bytes * $pct / 100" | bc -l)
-        N=$(echo "scale=0; sqrt($used_mem_bytes / 8)" | bc -l)
-        N=$(( (N / 8) * 8 ))
-        N_values+=( "$N" )
+generate_nb_values() {
+    NB_values=()
+    for (( nb = min_nb; nb <= max_nb; nb += step_nb )); do
+        NB_values+=( "$nb" )
     done
+    echo "N fixed at: $N"
+    echo "NB values: ${NB_values[*]}"
 }
 
 generate_hpl_dat_files() {
     cp HPL.dat HPL.dat.original
 
-    for size in "${N_values[@]}"; do
-        local datfile="HPL_${size}.dat"
-        local outfile="HPL_${size}.out"
-        sed -e "3s|.*|$outfile|" -e "6s|.*|$size Ns|" HPL.dat.original > "$datfile"
+    for nb in "${NB_values[@]}"; do
+        local datfile="HPL_N${N}_NB${nb}.dat"
+        local outfile="HPL_N${N}_NB${nb}.out"
+
+        # Standard HPL.dat layout:
+        # line 3: output file
+        # line 6: N
+        # line 8: NB
+        sed -e "3s|.*|$outfile|" \
+            -e "6s|.*|$N Ns|" \
+            -e "8s|.*|$nb NBs|" \
+            HPL.dat.original > "$datfile"
+
         echo "Generated file: $datfile"
     done
 }
 
 run_hpl() {
-    local size=$1
+    local nb=$1
 
     init_temperature_log temperature.csv
 
@@ -186,7 +189,7 @@ run_hpl() {
     local during_pid=$!
     collectl_pids+=( "$during_pid" )
 
-    cp "HPL_${size}.dat" HPL.dat
+    cp "HPL_N${N}_NB${nb}.dat" HPL.dat
     mpirun -np 4 xhpl
 
     kill "$during_pid" 2>/dev/null || true
@@ -204,24 +207,23 @@ run_hpl() {
     kill "$temp_after_pid" 2>/dev/null || true
 }
 
-generate_n_values
-echo "Problem sizes: ${N_values[*]}"
-
+generate_nb_values
 generate_hpl_dat_files
 
-for size in "${N_values[@]}"; do
-    mkdir -p "N${size}"
+for nb in "${NB_values[@]}"; do
+    dir="N${N}_NB${nb}"
+    mkdir -p "$dir"
     for (( rep = 0; rep < repetitions; rep++ )); do
-        echo "Running N=$size, repetition=$rep"
-        run_hpl "$size"
+        echo "Running N=$N, NB=$nb, repetition=$rep"
+        run_hpl "$nb"
 
-        mv "HPL_${size}.out" "N${size}/HPL_${size}_rep${rep}.out"
-        mv state_before.csv   "N${size}/state_before_rep${rep}.csv"
-        mv state_during.csv   "N${size}/state_during_rep${rep}.csv"
-        mv state_after.csv    "N${size}/state_after_rep${rep}.csv"
-        mv temperature.csv    "N${size}/temperature_rep${rep}.csv"
+        mv "HPL_N${N}_NB${nb}.out" "$dir/HPL_N${N}_NB${nb}_rep${rep}.out"
+        mv state_before.csv        "$dir/state_before_rep${rep}.csv"
+        mv state_during.csv        "$dir/state_during_rep${rep}.csv"
+        mv state_after.csv         "$dir/state_after_rep${rep}.csv"
+        mv temperature.csv         "$dir/temperature_rep${rep}.csv"
     done
-    mv "HPL_${size}.dat" "N${size}/HPL_${size}.dat"
+    mv "HPL_N${N}_NB${nb}.dat" "$dir/HPL_N${N}_NB${nb}.dat"
 done
 
-echo "All N experiments completed."
+echo "All NB experiments completed."
